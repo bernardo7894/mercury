@@ -191,6 +191,12 @@ typedef struct
     bool     acktx_had_has_data;       /* HAS_DATA was set in the last ACK sent */
     int      peer_snr_x10;            /* peer-reported SNR * 10 (integer)     */
     int      local_snr_x10;           /* local SNR EMA * 10                   */
+    int      ack_snr_x10;             /* ACK return-path SNR EMA * 10:
+                                       * tracks local decode SNR of DATAC13
+                                       * control frames (ACK, TURN, MODE,
+                                       * KEEPALIVE). Used to gate mode upgrades:
+                                       * if ISS can't reliably decode ACKs, upgrading
+                                       * the data mode only increases retry waste. */
     uint64_t peer_busy_until_ms;      /* remote TX busy guard expiry          */
 
     /* --- Data bookkeeping --- */

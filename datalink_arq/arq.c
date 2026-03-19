@@ -608,6 +608,7 @@ void arq_handle_incoming_frame(uint8_t *data, size_t frame_size, float rx_snr)
     }
     else if (hdr.packet_type == PACKET_TYPE_ARQ_CONTROL)
     {
+        ev.rx_snr = rx_snr;
         switch (hdr.subtype)
         {
         case ARQ_SUBTYPE_ACK:          ev.id = ARQ_EV_RX_ACK;           break;

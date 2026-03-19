@@ -227,6 +227,14 @@ extern _Atomic int arq_disconnect_retry_slots;
 #define ARQ_LADDER_UP_SUCCESSES       4     /* clean ACKs required to step up    */
 #define ARQ_RETRY_DOWNGRADE_THRESHOLD 2     /* consecutive retries to force downgrade */
 #define ARQ_MODE_HOLD_AFTER_DOWNGRADE_S 15  /* hold lower mode after forced downgrade */
+#define ARQ_ACK_SNR_GATE_DB           0.0f  /* ACK return-path SNR must be >= this to
+                                             * allow mode upgrade beyond DATAC4.
+                                             * DATAC13 threshold is -4 dB; gating at
+                                             * 0 dB gives 4 dB margin so ACKs decode
+                                             * reliably. Without this gate, upgrades
+                                             * based on peer_snr succeed on the data
+                                             * path but ACKs get lost, causing 80%+
+                                             * retry rates on asymmetric channels.  */
 
 /* In DATA frames the ack_delay byte is repurposed to carry payload_valid:
  *   0               = full frame (all user bytes are valid data)

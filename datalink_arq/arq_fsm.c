@@ -223,6 +223,21 @@ static void update_local_snr(arq_session_t *sess, const arq_event_t *ev)
         sess->local_snr_x10 = (sess->local_snr_x10 * 3 + snr_x10) / 4;
 }
 
+/** Update ack_snr_x10 EMA from the local decode SNR of a received DATAC13
+ *  control frame (ACK, TURN, MODE, KEEPALIVE).  This tracks how reliably the
+ *  ISS can decode the ACK return path.  Gated mode upgrades use this value
+ *  to prevent upgrading when ACKs are marginal. */
+static void update_ack_snr(arq_session_t *sess, const arq_event_t *ev)
+{
+    if (ev->rx_snr <= -100.0f || ev->rx_snr >= 100.0f || ev->rx_snr == 0.0f)
+        return;
+    int snr_x10 = (int)(ev->rx_snr * 10.0f);
+    if (sess->ack_snr_x10 == 0)
+        sess->ack_snr_x10 = snr_x10;
+    else
+        sess->ack_snr_x10 = (sess->ack_snr_x10 * 3 + snr_x10) / 4;
+}
+
 /** Update peer_snr_x10 from the sender's SNR feedback carried in a received
  *  frame.  The DATA frame's snr_encoded = sender's local_snr_x10 = what the
  *  sender (current ISS) receives from us (current IRS). */
@@ -386,6 +401,28 @@ static bool maybe_upgrade_mode(arq_session_t *sess)
         hermes_uptime_ms() < sess->mode_hold_until_ms)
         return false;
 
+    /* ACK return-path gate: block upgrades when the local DATAC13 ACK
+     * decode SNR is below the gate threshold.  On asymmetric channels the
+     * peer-reported SNR (data path) can be excellent while the ISS barely
+     * decodes the DATAC13 ACKs.  Upgrading in that situation only increases
+     * the retry rate because every missed ACK wastes a full frame TX +
+     * timeout wait cycle.  Downgrades are always allowed. */
+    if (mode_rank(desired_mode) > mode_rank(sess->payload_mode) &&
+        sess->ack_snr_x10 != 0)
+    {
+        float ack_snr = (float)sess->ack_snr_x10 / 10.0f;
+        if (ack_snr < ARQ_ACK_SNR_GATE_DB)
+        {
+            HLOGD(LOG_COMP,
+                  "Mode upgrade blocked: ACK path SNR %.1f dB < gate %.1f dB "
+                  "(peer_snr=%.1f dB, desired=%d)",
+                  ack_snr, ARQ_ACK_SNR_GATE_DB,
+                  (float)sess->peer_snr_x10 / 10.0f, desired_mode);
+            sess->mode_upgrade_count = 0;
+            return false;
+        }
+    }
+
     /* Hysteresis: require ARQ_MODE_SWITCH_HYST_COUNT consecutive observations. */
     sess->mode_upgrade_count++;
     if (sess->mode_upgrade_count < ARQ_MODE_SWITCH_HYST_COUNT)
@@ -406,9 +443,11 @@ static bool maybe_upgrade_mode(arq_session_t *sess)
     sess->pending_tx_mode = desired_mode;
     sess->tx_retries_left = ARQ_MODE_REQ_RETRIES;
 
-    HLOGI(LOG_COMP, "Mode negotiation: %d -> %d (peer_snr=%.1f dB, ladder=%d, backlog=%d)",
+    HLOGI(LOG_COMP, "Mode negotiation: %d -> %d (peer_snr=%.1f dB, ack_snr=%.1f dB, ladder=%d, backlog=%d)",
           sess->payload_mode, desired_mode,
-          (float)sess->peer_snr_x10 / 10.0f, sess->speed_level, backlog);
+          (float)sess->peer_snr_x10 / 10.0f,
+          (float)sess->ack_snr_x10 / 10.0f,
+          sess->speed_level, backlog);
 
     send_mode_negotiation(sess, ARQ_SUBTYPE_MODE_REQ, desired_mode);
     dflow_enter(sess, ARQ_DFLOW_MODE_REQ_TX, UINT64_MAX, ARQ_EV_TIMER_RETRY);
@@ -700,6 +739,7 @@ static void fsm_disconnected(arq_session_t *sess, const arq_event_t *ev)
         sess->tx_success_count   = 0;
         sess->consecutive_retries = 0;
         sess->mode_hold_until_ms = 0;
+        sess->ack_snr_x10        = 0;
         send_call_accept(sess, false);
         {
             const arq_mode_timing_t *tm =
@@ -741,6 +781,7 @@ static void fsm_listening(arq_session_t *sess, const arq_event_t *ev)
         sess->tx_success_count   = 0;
         sess->consecutive_retries = 0;
         sess->mode_hold_until_ms = 0;
+        sess->ack_snr_x10        = 0;
         /* Do NOT send ACCEPT immediately: the caller's PTT-OFF may not have
          * happened yet when we decode the last samples of their CALL frame.
          * Wait ARQ_CHANNEL_GUARD_MS so their relay is in RX before we TX. */
@@ -792,6 +833,7 @@ static void fsm_listening(arq_session_t *sess, const arq_event_t *ev)
             sess->speed_level        = 0;
             sess->tx_success_count   = 0;
             sess->pending_disconnect = false;  /* clear stale deferred disconnect */
+            sess->ack_snr_x10        = 0;
             sess->startup_deadline_ms = hermes_uptime_ms() + (ARQ_STARTUP_MAX_S * 1000ULL);
             if (g_cbs.notify_connected)
                 g_cbs.notify_connected(sess->remote_call);
@@ -832,6 +874,7 @@ static void fsm_calling(arq_session_t *sess, const arq_event_t *ev)
             sess->speed_level        = 0;
             sess->tx_success_count   = 0;
             sess->pending_disconnect = false;  /* clear stale deferred disconnect */
+            sess->ack_snr_x10        = 0;
             sess->startup_deadline_ms =
                 hermes_uptime_ms() + (ARQ_STARTUP_MAX_S * 1000ULL);
             if (g_cbs.notify_connected)
@@ -901,6 +944,7 @@ static void fsm_accepting(arq_session_t *sess, const arq_event_t *ev)
         sess->mode_upgrade_count = 0;
         sess->speed_level        = 0;
         sess->tx_success_count   = 0;
+        sess->ack_snr_x10        = 0;
         sess->startup_deadline_ms =
             hermes_uptime_ms() + (ARQ_STARTUP_MAX_S * 1000ULL);
         if (g_cbs.notify_connected)
@@ -1243,13 +1287,29 @@ static void fsm_dflow(arq_session_t *sess, const arq_event_t *ev)
             if (sess->tx_retries_left > 0)
             {
                 sess->tx_retries_left--;
-                /* Ladder step-down happens once per frame in the RX_ACK /
-                 * implicit-ACK handler via record_tx_outcome(), NOT here.
-                 * Calling it on every retry would cause double/triple penalty
-                 * when the ACK handler also calls it. */
+                int retries_this_frame =
+                    ARQ_DATA_RETRY_SLOTS - sess->tx_retries_left;
+
+                /* In-flight downgrade detection: when a single frame
+                 * accumulates ARQ_RETRY_DOWNGRADE_THRESHOLD ACK timeouts,
+                 * immediately arm consecutive_retries so that the next
+                 * maybe_upgrade_mode() call (after the eventual ACK or
+                 * on the next ISS turn) triggers a mode downgrade without
+                 * needing another failed frame.  This cuts the delay
+                 * between noticing ACK-path trouble and actually reacting. */
+                if (retries_this_frame >= ARQ_RETRY_DOWNGRADE_THRESHOLD &&
+                    sess->consecutive_retries < ARQ_RETRY_DOWNGRADE_THRESHOLD)
+                {
+                    sess->consecutive_retries = ARQ_RETRY_DOWNGRADE_THRESHOLD;
+                    HLOGD(LOG_COMP,
+                          "In-flight retry threshold: arming downgrade "
+                          "(seq=%d attempt=%d)",
+                          (int)sess->tx_seq, retries_this_frame);
+                }
+
                 if (g_timing)
                     arq_timing_record_retry(g_timing, (int)sess->tx_seq,
-                                            ARQ_DATA_RETRY_SLOTS - sess->tx_retries_left,
+                                            retries_this_frame,
                                             "ack_timeout");
                 dflow_enter(sess, ARQ_DFLOW_DATA_TX, UINT64_MAX, ARQ_EV_TIMER_RETRY);
                 send_data_frame(sess);
@@ -1742,6 +1802,13 @@ void arq_fsm_dispatch(arq_session_t *sess, const arq_event_t *ev)
                   (int)ev->session_id, (int)sess->session_id);
             return;
         }
+        /* Update ACK return-path SNR EMA from DATAC13 control frames.
+         * All control frames (ACK, TURN, MODE, KEEPALIVE, DISCONNECT) are
+         * transmitted via DATAC13, so their rx_snr reflects the ACK path
+         * quality — the critical bottleneck on asymmetric channels. */
+        if (ev->id != ARQ_EV_RX_DATA && ev->id != ARQ_EV_RX_CALL &&
+            ev->id != ARQ_EV_RX_ACCEPT)
+            update_ack_snr(sess, ev);
         break;
     default:
         break;
