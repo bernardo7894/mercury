@@ -961,7 +961,10 @@ static void process_received_frame(const uint8_t *data,
         break;
     case PACKET_TYPE_BROADCAST_CONTROL:
     case PACKET_TYPE_BROADCAST_DATA:
-        write_buffer(data_rx_buffer_broadcast, (uint8_t *)data, payload_nbytes);
+        // Non-blocking: drop frame if no client is consuming. Prevents
+        // rx_thread from deadlocking when no broadcast client is connected.
+        if (circular_buf_free_size(data_rx_buffer_broadcast) >= payload_nbytes)
+            write_buffer(data_rx_buffer_broadcast, (uint8_t *)data, payload_nbytes);
         break;
     default:
         HLOGW("modem-rx", "Unknown frame type received");

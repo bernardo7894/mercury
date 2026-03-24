@@ -849,7 +849,10 @@ void *recv_thread(void *client_socket_ptr)
                     continue;
                 }
 
-                write_buffer(data_tx_buffer_broadcast, decoded_frame, frame_size);
+                // Non-blocking: drop frame if buffer is full to keep recv
+                // responsive for disconnect detection
+                if (circular_buf_free_size(data_tx_buffer_broadcast) >= frame_size)
+                    write_buffer(data_tx_buffer_broadcast, decoded_frame, frame_size);
             }
         }
         else if (received == 0)
@@ -931,6 +934,7 @@ void *tcp_server_thread(void *port_ptr)
         // Flush broadcast buffers to discard stale data from previous sessions
         clear_buffer(data_tx_buffer_broadcast);
         clear_buffer(data_rx_buffer_broadcast);
+        reset_interrupt(data_rx_buffer_broadcast);
 
         pthread_t recv_tid, send_tid;
 
@@ -938,12 +942,19 @@ void *tcp_server_thread(void *port_ptr)
         pthread_create(&recv_tid, NULL, recv_thread, (void *)&client_socket);
         pthread_create(&send_tid, NULL, send_thread, (void *)&client_socket);
 
-        // Wait for threads to finish
+        // Wait for recv_thread to finish (client disconnected or error)
         pthread_join(recv_tid, NULL);
-        pthread_cancel(send_tid);
+
+        // Safely stop send_thread: interrupt the buffer it's blocking on
+        // (instead of pthread_cancel which leaves the mutex locked)
+        SOCK_CLOSE(client_socket);
+        interrupt_buffer(data_rx_buffer_broadcast);
         pthread_join(send_tid, NULL);
 
-        SOCK_CLOSE(client_socket);
+        // Discard any stale broadcast TX data queued during this session
+        clear_buffer(data_tx_buffer_broadcast);
+        clear_buffer(data_rx_buffer_broadcast);
+
         HLOGI("tcp-bcast", "Waiting for a new client to connect...");
     }
 

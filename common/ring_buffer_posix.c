@@ -299,6 +299,7 @@ void circular_buf_reset(cbuf_handle_t cbuf)
     cbuf->internal->head = 0;
     cbuf->internal->tail = 0;
     cbuf->internal->full = false;
+    cbuf->internal->interrupted = false;
 
     MUTEX_UNLOCK( &cbuf->internal->mutex );
 }
@@ -340,6 +341,30 @@ void clear_buffer(cbuf_handle_t cbuf)
     cbuf->internal->head = 0;
     cbuf->internal->tail = 0;
 
+    COND_SIGNAL( &cbuf->internal->cond );
+    MUTEX_UNLOCK( &cbuf->internal->mutex );
+}
+
+void interrupt_buffer(cbuf_handle_t cbuf)
+{
+    assert(cbuf && cbuf->internal);
+
+    MUTEX_LOCK( &cbuf->internal->mutex );
+    cbuf->internal->interrupted = true;
+#if !defined(_WIN32)
+    pthread_cond_broadcast( &cbuf->internal->cond );
+#else
+    SetEvent( cbuf->internal->cond );
+#endif
+    MUTEX_UNLOCK( &cbuf->internal->mutex );
+}
+
+void reset_interrupt(cbuf_handle_t cbuf)
+{
+    assert(cbuf && cbuf->internal);
+
+    MUTEX_LOCK( &cbuf->internal->mutex );
+    cbuf->internal->interrupted = false;
     MUTEX_UNLOCK( &cbuf->internal->mutex );
 }
 
@@ -569,6 +594,12 @@ int read_buffer(cbuf_handle_t cbuf, uint8_t *data, size_t len)
  try_again_read:
     MUTEX_LOCK( &cbuf->internal->mutex );
 
+    if (cbuf->internal->interrupted)
+    {
+        MUTEX_UNLOCK( &cbuf->internal->mutex );
+        return -1;
+    }
+
     size_t size = cbuf->internal->max;
 
     if(circular_buf_size_internal(cbuf) >= len)
@@ -606,6 +637,12 @@ int write_buffer(cbuf_handle_t cbuf, uint8_t * data, size_t len)
 
 try_again_write:
     MUTEX_LOCK( &cbuf->internal->mutex );
+
+    if (cbuf->internal->interrupted)
+    {
+        MUTEX_UNLOCK( &cbuf->internal->mutex );
+        return -1;
+    }
 
     size_t size = cbuf->internal->max;
 

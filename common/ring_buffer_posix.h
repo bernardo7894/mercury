@@ -25,6 +25,7 @@ struct circular_buf_t_aux {
     size_t tail;
     size_t max; //of the buffer
     bool full;
+    bool interrupted; // flag to interrupt blocking read/write
 
 #if defined(_WIN32)
     HANDLE            mutex;  /* mutex lock */
@@ -76,6 +77,12 @@ size_t size_buffer(cbuf_handle_t cbuf);
 
 // clear the buffer
 void clear_buffer(cbuf_handle_t cbuf);
+
+// interrupt all blocked readers/writers on this buffer (causes read/write to return -1)
+void interrupt_buffer(cbuf_handle_t cbuf);
+
+// reset the interrupted flag so normal read/write can resume
+void reset_interrupt(cbuf_handle_t cbuf);
 
 /// Reset the circular buffer to empty, head == tail. Data not cleared
 /// Requires: cbuf is valid and created by circular_buf_init
