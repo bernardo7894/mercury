@@ -928,6 +928,10 @@ void *tcp_server_thread(void *port_ptr)
 
         HLOGI("tcp-bcast", "Client connected.");
 
+        // Flush broadcast buffers to discard stale data from previous sessions
+        clear_buffer(data_tx_buffer_broadcast);
+        clear_buffer(data_rx_buffer_broadcast);
+
         pthread_t recv_tid, send_tid;
 
         // Create threads for receiving and sending data

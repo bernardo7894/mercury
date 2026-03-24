@@ -244,9 +244,9 @@ static uint32_t bitrate_level_from_payload_mode(int mode)
     }
 }
 
-static int select_payload_rx_mode(const arq_runtime_snapshot_t *snapshot, bool ready)
+static int select_payload_rx_mode(const arq_runtime_snapshot_t *snapshot, bool ready, int startup_mode)
 {
-    int mode = FREEDV_MODE_DATAC4;
+    int mode = is_payload_split_mode(startup_mode) ? startup_mode : FREEDV_MODE_DATAC4;
 
     if (!ready || !snapshot)
         return mode;
@@ -1267,6 +1267,7 @@ void *rx_thread(void *g_modem)
     rx_decoder_state_t payload_decoder = {0};
     int last_pref_rx_mode = -1;
     int last_pref_tx_mode = -1;
+    int startup_mode = -1;
     bool was_tx = false;
     uint64_t spectrum_next_ms = 0; /* throttle FFT to ~20 fps */
 
@@ -1276,7 +1277,13 @@ void *rx_thread(void *g_modem)
         memset(&arq_snapshot, 0, sizeof(arq_snapshot));
         bool have_arq_snapshot = arq_get_runtime_snapshot(&arq_snapshot);
         bool arq_policy_ready = arq_mode_policy_ready_snapshot(have_arq_snapshot, &arq_snapshot);
-        int payload_mode = select_payload_rx_mode(&arq_snapshot, arq_policy_ready);
+        if (startup_mode < 0)
+        {
+            pthread_mutex_lock(&modem_freedv_lock);
+            startup_mode = modem->mode;
+            pthread_mutex_unlock(&modem_freedv_lock);
+        }
+        int payload_mode = select_payload_rx_mode(&arq_snapshot, arq_policy_ready, startup_mode);
         int pref_rx_mode = -1;
         int pref_tx_mode = -1;
         if (arq_policy_ready)
