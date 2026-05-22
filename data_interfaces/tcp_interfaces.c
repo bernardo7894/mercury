@@ -950,11 +950,15 @@ static bool bcast_process_decoded_frame(uint8_t *decoded_frame, int frame_len,
  * Mercury header byte so the client receives the original raw beacon payload,
  * sent with CMD_DATA.
  *
- * CMD_DATA (hermes-broadcast): forward the full frame including the Mercury
- * header — hermes-broadcast's receiver parses frame[0] as the packet type.
+ * CMD_DATA (hermes-broadcast, explicit): forward the full frame including the
+ * Mercury header — hermes-broadcast's receiver parses frame[0] as the packet
+ * type.  The latch is set to CMD_DATA only when the client actively sends
+ * CMD_DATA frames (hermes-broadcast tool behaviour).
  *
- * CMD_AX25CALLSIGN (VarAC/VARA): strip the Mercury header byte so the client
- * receives a raw AX.25 payload.
+ * CMD_AX25CALLSIGN (VarAC/VARA, also the connection default): strip the
+ * Mercury header byte so the client receives a raw AX.25 payload.  VarAC IRS
+ * clients that only listen for broadcasts never send any frames, so the default
+ * must be CMD_AX25CALLSIGN to serve them correctly.
  *
  * Sets *payload_out and *payload_len_out; returns the reply command byte.
  */
@@ -1172,7 +1176,13 @@ void *tcp_server_thread(void *port_ptr)
         HLOGI("tcp-bcast", "Client connected.");
 
         bcast_client_done = false;
-        atomic_store_explicit(&bcast_reply_cmd, CMD_DATA, memory_order_relaxed);
+        /* Default to CMD_AX25CALLSIGN (VarAC/VARA format): VarAC clients that
+         * only listen for broadcasts never send a frame that would update the
+         * latch, so they must get the correct format from the start.  Dedicated
+         * hermes-broadcast senders always transmit CMD_DATA frames shortly after
+         * connecting, which updates the latch to CMD_DATA before any over-air
+         * frames need to be forwarded. */
+        atomic_store_explicit(&bcast_reply_cmd, CMD_AX25CALLSIGN, memory_order_relaxed);
 
         pthread_t recv_tid, send_tid;
 

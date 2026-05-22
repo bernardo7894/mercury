@@ -740,14 +740,16 @@ void test_bcast_rx_vara_long_payload_truncated(void)
         TEST_ASSERT_EQUAL_HEX8((uint8_t)(0x10 + i), last_write_buffer_data[1 + i]);
 }
 
-/* bcast_get_tx_payload: CMD_DATA → full frame, payload_len == frame_size */
+/* bcast_get_tx_payload: CMD_DATA (explicit hermes-broadcast latch) → full frame,
+ * payload_len == frame_size */
 void test_bcast_tx_cmd_data_full_frame(void)
 {
     const size_t fsz = 10;
     uint8_t frame[10];
     memset(frame, 0xDD, fsz);
-    frame[0] = 0x60; /* Mercury header present */
+    frame[0] = 0x60; /* PACKET_TYPE_BROADCAST_CONTROL Mercury header */
 
+    /* hermes-broadcast explicitly sends CMD_DATA frames which set the latch */
     atomic_store_explicit(&bcast_reply_cmd, CMD_DATA, memory_order_relaxed);
 
     uint8_t *payload = NULL;
@@ -757,6 +759,29 @@ void test_bcast_tx_cmd_data_full_frame(void)
     TEST_ASSERT_EQUAL_HEX8(CMD_DATA, cmd);
     TEST_ASSERT_EQUAL_PTR(frame, payload);       /* must point to start of frame */
     TEST_ASSERT_EQUAL_INT((int)fsz, plen);        /* full frame_size */
+}
+
+/* bcast_get_tx_payload: CMD_AX25CALLSIGN default (VarAC IRS listen-only) →
+ * Mercury header stripped, raw AX.25 payload forwarded with CMD_AX25CALLSIGN.
+ * VarAC IRS clients never send frames so the latch stays at the connection
+ * default (CMD_AX25CALLSIGN). */
+void test_bcast_tx_vara_irs_default_strips_header(void)
+{
+    const size_t fsz = 10;
+    uint8_t frame[10];
+    frame[0] = BCAST_HDR_BYTE; /* PACKET_TYPE_BROADCAST_DATA Mercury header */
+    memset(frame + 1, 0xAB, fsz - 1); /* raw AX.25 payload */
+
+    /* Simulate connection default (no client frame sent yet) */
+    atomic_store_explicit(&bcast_reply_cmd, CMD_AX25CALLSIGN, memory_order_relaxed);
+
+    uint8_t *payload = NULL;
+    int plen = 0;
+    uint8_t cmd = bcast_get_tx_payload(frame, fsz, &payload, &plen);
+
+    TEST_ASSERT_EQUAL_HEX8(CMD_AX25CALLSIGN, cmd);          /* VarAC KISS command */
+    TEST_ASSERT_EQUAL_PTR(frame + HEADER_SIZE, payload);     /* Mercury header stripped */
+    TEST_ASSERT_EQUAL_INT((int)fsz - HEADER_SIZE, plen);     /* one byte shorter */
 }
 
 /* bcast_get_tx_payload: CMD_AX25CALLSIGN → header stripped, payload_len == frame_size-1 */
@@ -849,6 +874,7 @@ int main(void)
     RUN_TEST(test_bcast_rx_cmd_ax25_reply_cmd);
     RUN_TEST(test_bcast_rx_vara_long_payload_truncated);
     RUN_TEST(test_bcast_tx_cmd_data_full_frame);
+    RUN_TEST(test_bcast_tx_vara_irs_default_strips_header);
     RUN_TEST(test_bcast_tx_vara_strips_header);
     RUN_TEST(test_bcast_rx_cmd_data_beacon_header_injected);
     RUN_TEST(test_bcast_tx_beacon_strips_header);
