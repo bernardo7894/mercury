@@ -1031,6 +1031,7 @@ static void process_received_frame(const uint8_t *data,
         break;
     case PACKET_TYPE_BROADCAST_CONTROL:
     case PACKET_TYPE_BROADCAST_DATA:
+    case PACKET_TYPE_BEACON:
         if (broadcast_frame_size > 0 && payload_nbytes != broadcast_frame_size)
         {
             HLOGD("modem-rx", "Discarding broadcast frame: size %zu != expected %zu",

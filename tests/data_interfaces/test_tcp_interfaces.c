@@ -575,6 +575,10 @@ void test_cmd_callint_negative(void)
  *   (0x04 << 5) | 0 = 0x80 */
 #define BCAST_HDR_BYTE 0x80
 
+/* Expected Mercury header byte for PACKET_TYPE_BEACON (0x06), ext=0:
+ *   (0x06 << 5) | 0 = 0xC0 */
+#define BEACON_HDR_BYTE 0xC0
+
 /* CMD_DATA, exact frame_size: queued unchanged, bcast_reply_cmd = CMD_DATA */
 void test_bcast_rx_cmd_data_exact_size(void)
 {
@@ -618,7 +622,8 @@ void test_bcast_rx_cmd_data_short_padded(void)
         atomic_load_explicit(&bcast_reply_cmd, memory_order_relaxed));
 }
 
-/* CMD_DATA, oversized: discarded, write_buffer never called */
+/* CMD_DATA, oversized hermes-broadcast frame (valid Mercury broadcast header in
+ * frame[0]): discarded, write_buffer never called */
 void test_bcast_rx_cmd_data_oversized_discarded(void)
 {
     const size_t fsz = 10;
@@ -626,12 +631,44 @@ void test_bcast_rx_cmd_data_oversized_discarded(void)
 
     uint8_t frame[MAX_PAYLOAD];
     memset(frame, 0x11, sizeof(frame));
+    /* frame[0] must encode a broadcast packet type so our new code does NOT
+     * classify the frame as a VarAC beacon.  0x60 = PACKET_TYPE_BROADCAST_CONTROL. */
+    frame[0] = 0x60;
 
     bool ok = bcast_process_decoded_frame(frame, (int)fsz + 5, CMD_DATA, fsz);
 
     TEST_ASSERT_FALSE(ok);
     TEST_ASSERT_EQUAL(0, write_buffer_call_count);
     /* bcast_reply_cmd is still set even for discarded frames */
+    TEST_ASSERT_EQUAL_HEX8(CMD_DATA,
+        atomic_load_explicit(&bcast_reply_cmd, memory_order_relaxed));
+}
+
+/* CMD_DATA, VarAC unformatted beacon (frame[0] is NOT a broadcast Mercury header):
+ * a PACKET_TYPE_BEACON header must be injected, raw payload shifted, zero-padded. */
+void test_bcast_rx_cmd_data_beacon_header_injected(void)
+{
+    const size_t fsz = 10;
+    broadcast_frame_size_cfg = fsz;
+
+    uint8_t frame[MAX_PAYLOAD];
+    memset(frame, 0, sizeof(frame));
+    /* 5-byte raw beacon payload starting with 0x11 (not a broadcast header byte) */
+    for (int i = 0; i < 5; i++) frame[i] = (uint8_t)(0x11 + i);
+
+    bool ok = bcast_process_decoded_frame(frame, 5, CMD_DATA, fsz);
+
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL(1, write_buffer_call_count);
+    TEST_ASSERT_EQUAL_size_t(fsz, last_write_buffer_len);
+    /* frame[0] must be the injected PACKET_TYPE_BEACON header byte */
+    TEST_ASSERT_EQUAL_HEX8(BEACON_HDR_BYTE, last_write_buffer_data[0]);
+    /* Original raw payload shifted to [1..5] */
+    for (int i = 0; i < 5; i++)
+        TEST_ASSERT_EQUAL_HEX8((uint8_t)(0x11 + i), last_write_buffer_data[1 + i]);
+    /* Tail bytes [6..9] must be zero */
+    for (size_t i = 6; i < fsz; i++)
+        TEST_ASSERT_EQUAL_HEX8(0x00, last_write_buffer_data[i]);
     TEST_ASSERT_EQUAL_HEX8(CMD_DATA,
         atomic_load_explicit(&bcast_reply_cmd, memory_order_relaxed));
 }
@@ -741,6 +778,28 @@ void test_bcast_tx_vara_strips_header(void)
     TEST_ASSERT_EQUAL_INT((int)fsz - HEADER_SIZE, plen); /* one byte shorter */
 }
 
+/* bcast_get_tx_payload: PACKET_TYPE_BEACON frame → Mercury header stripped,
+ * raw beacon payload forwarded with CMD_DATA regardless of bcast_reply_cmd. */
+void test_bcast_tx_beacon_strips_header(void)
+{
+    const size_t fsz = 10;
+    uint8_t frame[10];
+    frame[0] = BEACON_HDR_BYTE; /* PACKET_TYPE_BEACON header */
+    memset(frame + 1, 0xBB, fsz - 1); /* raw beacon payload */
+
+    /* Simulate CMD_AX25CALLSIGN latched from a prior TX — beacon path must
+     * override and always use CMD_DATA regardless. */
+    atomic_store_explicit(&bcast_reply_cmd, CMD_AX25CALLSIGN, memory_order_relaxed);
+
+    uint8_t *payload = NULL;
+    int plen = 0;
+    uint8_t cmd = bcast_get_tx_payload(frame, fsz, &payload, &plen);
+
+    TEST_ASSERT_EQUAL_HEX8(CMD_DATA, cmd);                    /* always CMD_DATA for beacon */
+    TEST_ASSERT_EQUAL_PTR(frame + HEADER_SIZE, payload);      /* Mercury header stripped */
+    TEST_ASSERT_EQUAL_INT((int)fsz - HEADER_SIZE, plen);      /* one byte shorter */
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -791,5 +850,7 @@ int main(void)
     RUN_TEST(test_bcast_rx_vara_long_payload_truncated);
     RUN_TEST(test_bcast_tx_cmd_data_full_frame);
     RUN_TEST(test_bcast_tx_vara_strips_header);
+    RUN_TEST(test_bcast_rx_cmd_data_beacon_header_injected);
+    RUN_TEST(test_bcast_tx_beacon_strips_header);
     return UNITY_END();
 }

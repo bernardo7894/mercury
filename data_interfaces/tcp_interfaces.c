@@ -855,8 +855,12 @@ void *control_worker_thread_rx(void *conn)
  * PACKET_TYPE_BROADCAST_DATA header, truncate if the payload would overflow,
  * then zero-pad to frame_size.
  *
- * hermes-broadcast (CMD_DATA): the frame already carries the Mercury header;
- * zero-pad if short, discard if oversized.
+ * hermes-broadcast (CMD_DATA with valid Mercury broadcast header): the frame
+ * already carries the Mercury header; zero-pad if short, discard if oversized.
+ *
+ * VarAC unformatted frames (CMD_DATA without a Mercury broadcast header, e.g.
+ * beacon): inject a 1-byte PACKET_TYPE_BEACON header so the frame is correctly
+ * classified at the modem RX side.
  *
  * Also latches bcast_reply_cmd so send_thread mirrors the client's framing.
  *
@@ -887,6 +891,36 @@ static bool bcast_process_decoded_frame(uint8_t *decoded_frame, int frame_len,
         HLOGD("tcp-bcast", "Added Mercury broadcast header (cmd=0x%02X), frame now %d bytes",
               kiss_cmd, frame_len);
     }
+    else
+    {
+        /*
+         * CMD_DATA: hermes-broadcast frames already carry a Mercury header in
+         * frame[0] (PACKET_TYPE_BROADCAST_CONTROL or PACKET_TYPE_BROADCAST_DATA).
+         * VarAC unformatted frames (e.g. beacon) also use CMD_DATA but send raw
+         * payload without a Mercury header.  Distinguish them by inspecting the
+         * packet type encoded in the first byte: if it is not a broadcast type,
+         * the frame is a VarAC unformatted frame and we inject PACKET_TYPE_BEACON.
+         */
+        if (frame_len > 0)
+        {
+            uint8_t ptype = frame_header_packet_type(decoded_frame[0]);
+            if (ptype != PACKET_TYPE_BROADCAST_CONTROL && ptype != PACKET_TYPE_BROADCAST_DATA)
+            {
+                size_t max_payload = frame_size - HEADER_SIZE;
+                if ((size_t)frame_len > max_payload)
+                {
+                    HLOGW("tcp-bcast", "Truncating VarAC beacon frame from %d to %zu to fit header",
+                          frame_len, max_payload);
+                    frame_len = (int)max_payload;
+                }
+                memmove(decoded_frame + HEADER_SIZE, decoded_frame, (size_t)frame_len);
+                write_frame_header(decoded_frame, PACKET_TYPE_BEACON, 0);
+                frame_len += HEADER_SIZE;
+                HLOGD("tcp-bcast", "Injected Mercury beacon header (CMD_DATA unformatted), frame now %d bytes",
+                      frame_len);
+            }
+        }
+    }
 
     if ((size_t)frame_len > frame_size)
     {
@@ -912,6 +946,10 @@ static bool bcast_process_decoded_frame(uint8_t *decoded_frame, int frame_len,
  * Computes the payload slice and KISS command byte to send back to a broadcast
  * client, reading the latched bcast_reply_cmd.
  *
+ * PACKET_TYPE_BEACON frames (VarAC beacon received over the air): strip the
+ * Mercury header byte so the client receives the original raw beacon payload,
+ * sent with CMD_DATA.
+ *
  * CMD_DATA (hermes-broadcast): forward the full frame including the Mercury
  * header — hermes-broadcast's receiver parses frame[0] as the packet type.
  *
@@ -924,6 +962,17 @@ static uint8_t bcast_get_tx_payload(uint8_t *frame_buffer, size_t frame_size,
                                      uint8_t **payload_out, int *payload_len_out)
 {
     uint8_t reply_cmd = atomic_load_explicit(&bcast_reply_cmd, memory_order_relaxed);
+
+    /* Beacon frames always have the Mercury header stripped before delivery
+     * to VarAC/VARA clients, regardless of the latched reply command. */
+    if (frame_size >= HEADER_SIZE &&
+        frame_header_packet_type(frame_buffer[0]) == PACKET_TYPE_BEACON)
+    {
+        *payload_out     = frame_buffer + HEADER_SIZE;
+        *payload_len_out = (int)frame_size - HEADER_SIZE;
+        return CMD_DATA;
+    }
+
     if (reply_cmd == CMD_DATA)
     {
         *payload_out     = frame_buffer;
